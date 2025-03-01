@@ -6,7 +6,7 @@ import time
 from fasthtml.common import Div, Script, Style, Titled, fast_app, serve
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-app, rt = fast_app()  # NO exts='ws' => We'll define raw websockets ourselves.
+app, rt = fast_app()
 
 # Calculate total size
 GRID_SIZE = 20  # cells
@@ -14,15 +14,14 @@ CELL_SIZE = 20  # pixels
 GAP_SIZE = 2  # pixels
 PADDING = 10  # pixels per side
 TOTAL_SIZE = (GRID_SIZE * CELL_SIZE) + (GRID_SIZE - 1) * GAP_SIZE + 2 * PADDING
-score = 0  # New: Track score
-game_over = False  # New: Track game state
+score = 0
+game_over = False
 snake = [(10, 10)]
 direction = "right"
 food = None
 
 last_direction_change = 0
 connected_clients = set()
-
 opposites = {"left": "right", "right": "left", "up": "down", "down": "up"}
 
 
@@ -36,11 +35,8 @@ def place_food():
 
 
 def render_grid():
-    """Render the board HTML with snake + food."""
+    """Render the board HTML with snake, food, score, and game-over state."""
     cells = []
-
-    # Add debug markers
-
     for y in range(GRID_SIZE):
         for x in range(GRID_SIZE):
             cls_ = "grid-cell"
@@ -50,12 +46,28 @@ def render_grid():
                 cls_ += " food-cell"
             cells.append(Div(cls=cls_))
 
-    return Div(*cells, id="game-container", cls="grid-container")
+    score_display = Div(f"Score: {score}", cls="score-display", id="score-display")
+    game_over_message = (
+        Div("Game Over!", cls="game-over-message", id="game-over-message")
+        if game_over
+        else Div("", cls="game-over-message", id="game-over-message")
+    )
+
+    return Div(
+        score_display,
+        Div(*cells, id="game-container", cls="grid-container"),
+        game_over_message,
+    )
 
 
-# Alternative broadcast_state
 async def broadcast_state():
-    state = {"snake": snake, "food": food, "direction": direction}
+    state = {
+        "snake": snake,
+        "food": food,
+        "direction": direction,
+        "score": score,
+        "game_over": game_over,
+    }
     to_remove = []
     for ws in connected_clients:
         try:
@@ -68,9 +80,18 @@ async def broadcast_state():
 
 
 async def move_snake():
-    """Run forever, moving the snake & broadcasting updates."""
-    global snake, direction, food
+    """Run, moving the snake & broadcasting updates."""
+    global snake, direction, food, score, game_over
     while True:
+        if game_over:
+            await asyncio.sleep(1)
+            snake = [(10, 10)]
+            direction = "right"
+            food = place_food()
+            score = 0
+            game_over = False
+            await broadcast_state()
+            continue
         head_x, head_y = snake[0]
         if direction == "left":
             head_x -= 1
@@ -83,12 +104,16 @@ async def move_snake():
 
         head_x %= GRID_SIZE
         head_y %= GRID_SIZE
-
         new_head = (head_x, head_y)
+        if new_head in snake:
+            game_over = True
+            await broadcast_state()
+            await asyncio.sleep(2)
+            continue
         snake.insert(0, new_head)
 
-        # Food check => grow or pop
         if new_head == food:
+            score += 1  # Increment score when food is eaten
             food = place_food()
         else:
             snake.pop()
@@ -110,7 +135,6 @@ def index():
     """Renders an empty container & the JS for WebSocket."""
     return Titled(
         "Snake WebSockets!",
-        # Div("", id="game-container"),  # We'll fill this from the server
         render_grid(),
         Style(
             f"""
@@ -127,6 +151,7 @@ def index():
                 box-shadow: 0 0 10px rgba(0,0,0,0.5);
                 border: none;
                 box-sizing: border-box;
+                position: relative;
             }}
             .grid-cell {{
                 width: {CELL_SIZE}px;
@@ -145,6 +170,24 @@ def index():
                 border-radius: 50%;
                 box-shadow: 0 0 5px #e74c3c;
             }}
+            .score-display {{
+                color: white;
+                font-family: Arial, sans-serif;
+                font-size: 20px;
+                text-align: center;
+                margin-bottom: 10px;
+            }}
+            .game-over-message {{
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                color: #e74c3c;
+                font-family: Arial, sans-serif;
+                font-size: 48px;
+                font-weight: bold;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            }}
             """
         ),
         Script(
@@ -160,6 +203,9 @@ def index():
             socket.onmessage = (evt) => {{
                 const state = JSON.parse(evt.data);
                 const cells = document.querySelectorAll('.grid-cell');
+                const scoreDisplay = document.getElementById('score-display');
+                const gameOverMessage = document.getElementById('game-over-message');
+
                 cells.forEach(cell => {{
                     cell.className = 'grid-cell';
                 }});
@@ -169,10 +215,11 @@ def index():
                 }});
                 const foodIndex = state.food[1] * {GRID_SIZE} + state.food[0];
                 cells[foodIndex].classList.add('food-cell');
+
+                scoreDisplay.textContent = `Score: ${{state.score}}`;
+                gameOverMessage.textContent = state.game_over ? 'Game Over!' : '';
             }};
 
-
-            // Arrow keys => JSON with direction
             document.addEventListener('keydown', (e) => {{
                 let k = e.key.replace('Arrow','').toLowerCase();
                 if (['left','right','up','down'].includes(k)) {{
@@ -184,13 +231,7 @@ def index():
     )
 
 
-#################################################
-# Standard Starlette approach to websockets
-#################################################
 @app.websocket_route("/ws")
-# Add this global variable
-
-# In snake_ws websocket handler
 async def snake_ws(websocket: WebSocket):
     await websocket.accept()
     connected_clients.add(websocket)
@@ -207,7 +248,6 @@ async def snake_ws(websocket: WebSocket):
 
                 global direction, last_direction_change
                 current_time = time.time()
-                # Add 100ms debounce
                 if current_time - last_direction_change > 0.1 and d in opposites:
                     if opposites[d] != direction:
                         direction = d
