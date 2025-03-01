@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import random
 import time
 
@@ -262,4 +263,4 @@ async def snake_ws(websocket: WebSocket):
         connected_clients.discard(websocket)
 
 
-serve()
+serve(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
